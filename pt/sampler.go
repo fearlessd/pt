@@ -5,18 +5,35 @@ import (
 	"math/rand"
 )
 
+type SpecularMode int
+
+const (
+	SpecularModeNaive = iota
+	SpecularModeFirst
+	SpecularModeAll
+)
+
+type BounceMode int
+
+const (
+	BounceModeAny = iota
+	BounceModeDiffuse
+	BounceModeSpecular
+)
+
 type Sampler interface {
 	Sample(scene *Scene, ray Ray, rnd *rand.Rand) Color
 }
 
-func NewSampler(firstHitSamples, maxBounces int) Sampler {
-	return &DefaultSampler{firstHitSamples, maxBounces, true}
+func NewSampler(firstHitSamples, maxBounces int) *DefaultSampler {
+	return &DefaultSampler{firstHitSamples, maxBounces, true, SpecularModeNaive}
 }
 
 type DefaultSampler struct {
 	FirstHitSamples int
 	MaxBounces      int
 	DirectLighting  bool
+	SpecularMode    SpecularMode
 }
 
 func (s *DefaultSampler) Sample(scene *Scene, ray Ray, rnd *rand.Rand) Color {
@@ -49,21 +66,38 @@ func (s *DefaultSampler) sample(scene *Scene, ray Ray, emission bool, samples, d
 		result = result.Add(material.Color.MulScalar(material.Emittance * float64(samples)))
 	}
 	n := int(math.Sqrt(float64(samples)))
+	var ma, mb BounceMode
+	if s.SpecularMode == SpecularModeAll || (s.SpecularMode == SpecularModeFirst && n > 1) {
+		ma = BounceModeDiffuse
+		mb = BounceModeSpecular
+	} else {
+		ma = BounceModeAny
+		mb = BounceModeAny
+	}
 	for u := 0; u < n; u++ {
 		for v := 0; v < n; v++ {
-			fu := (float64(u) + rnd.Float64()) / float64(n)
-			fv := (float64(v) + rnd.Float64()) / float64(n)
-			newRay, reflected := ray.Bounce(&info, fu, fv, rnd)
-			indirect := s.sample(scene, newRay, reflected, 1, depth-1, rnd)
-			if reflected {
-				tinted := indirect.Mix(material.Color.Mul(indirect), material.Tint)
-				result = result.Add(tinted)
-			} else {
-				direct := Color{}
-				if s.DirectLighting {
-					direct = s.directLight(scene, info.Ray, rnd)
+			for mode := ma; mode <= mb; mode++ {
+				fu := (float64(u) + rnd.Float64()) / float64(n)
+				fv := (float64(v) + rnd.Float64()) / float64(n)
+				newRay, reflected, p := ray.Bounce(&info, fu, fv, mode, rnd)
+				if mode == BounceModeAny {
+					p = 1
 				}
-				result = result.Add(material.Color.Mul(direct.Add(indirect)))
+				if p > 0 && reflected {
+					// specular
+					indirect := s.sample(scene, newRay, reflected, 1, depth-1, rnd)
+					tinted := indirect.Mix(material.Color.Mul(indirect), material.Tint)
+					result = result.Add(tinted.MulScalar(p))
+				}
+				if p > 0 && !reflected {
+					// diffuse
+					indirect := s.sample(scene, newRay, reflected, 1, depth-1, rnd)
+					direct := Color{}
+					if s.DirectLighting {
+						direct = s.directLight(scene, info.Ray, rnd)
+					}
+					result = result.Add(material.Color.Mul(direct.Add(indirect)).MulScalar(p))
+				}
 			}
 		}
 	}
